@@ -66,16 +66,45 @@ class DNSDumpsterAPI(object):
 
     def search(self, domain):
         dnsdumpster_url = 'https://dnsdumpster.com/'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
-        req = self.session.get(dnsdumpster_url)
+        try:
+            req = self.session.get(dnsdumpster_url, headers=headers, timeout=10)
+        except Exception as e:
+            print("Could not connect to dnsdumpster.com: %s" % str(e), file=sys.stderr)
+            return {'domain': domain, 'dns_records': {'dns': [], 'mx': [], 'txt': [], 'host': []}, 'image_data': None, 'xls_data': None}
+
         soup = BeautifulSoup(req.content, 'html.parser')
-        csrf_middleware = soup.findAll('input', attrs={'name': 'csrfmiddlewaretoken'})[0]['value']
+
+        # Try multiple methods to find CSRF token
+        csrf_middleware = None
+        csrf_input = soup.find('input', attrs={'name': 'csrfmiddlewaretoken'})
+        if csrf_input:
+            csrf_middleware = csrf_input.get('value')
+        else:
+            # Try extracting from cookies
+            csrf_middleware = req.cookies.get('csrftoken')
+        if not csrf_middleware:
+            # Try regex fallback
+            match = re.search(r'csrfmiddlewaretoken["\'\s]+value=["\']([^"\']+)', req.content.decode('utf-8', errors='ignore'))
+            if match:
+                csrf_middleware = match.group(1)
+
+        if not csrf_middleware:
+            print("Warning: Could not retrieve CSRF token from dnsdumpster.com (site may have changed)", file=sys.stderr)
+            return {'domain': domain, 'dns_records': {'dns': [], 'mx': [], 'txt': [], 'host': []}, 'image_data': None, 'xls_data': None}
+
         self.display_message('Retrieved token: %s' % csrf_middleware)
 
         cookies = {'csrftoken': csrf_middleware}
-        headers = {'Referer': dnsdumpster_url, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36'}
+        headers['Referer'] = dnsdumpster_url
         data = {'csrfmiddlewaretoken': csrf_middleware, 'targetip': domain, 'user': 'free'}
-        req = self.session.post(dnsdumpster_url, cookies=cookies, data=data, headers=headers)
+
+        try:
+            req = self.session.post(dnsdumpster_url, cookies=cookies, data=data, headers=headers, timeout=15)
+        except Exception as e:
+            print("Could not post to dnsdumpster.com: %s" % str(e), file=sys.stderr)
+            return {'domain': domain, 'dns_records': {'dns': [], 'mx': [], 'txt': [], 'host': []}, 'image_data': None, 'xls_data': None}
 
         if req.status_code != 200:
             print(
@@ -83,11 +112,11 @@ class DNSDumpsterAPI(object):
                     url=dnsdumpster_url, code=req.status_code),
                 file=sys.stderr,
             )
-            return []
+            return {'domain': domain, 'dns_records': {'dns': [], 'mx': [], 'txt': [], 'host': []}, 'image_data': None, 'xls_data': None}
 
-        if 'There was an error getting results' in req.content.decode('utf-8'):
+        if 'There was an error getting results' in req.content.decode('utf-8', errors='ignore'):
             print("There was an error getting results", file=sys.stderr)
-            return []
+            return {'domain': domain, 'dns_records': {'dns': [], 'mx': [], 'txt': [], 'host': []}, 'image_data': None, 'xls_data': None}
 
         soup = BeautifulSoup(req.content, 'html.parser')
         tables = soup.findAll('table')
@@ -95,10 +124,10 @@ class DNSDumpsterAPI(object):
         res = {}
         res['domain'] = domain
         res['dns_records'] = {}
-        res['dns_records']['dns'] = self.retrieve_results(tables[0])
-        res['dns_records']['mx'] = self.retrieve_results(tables[1])
-        res['dns_records']['txt'] = self.retrieve_txt_record(tables[2])
-        res['dns_records']['host'] = self.retrieve_results(tables[3])
+        res['dns_records']['dns'] = self.retrieve_results(tables[0]) if len(tables) > 0 else []
+        res['dns_records']['mx'] = self.retrieve_results(tables[1]) if len(tables) > 1 else []
+        res['dns_records']['txt'] = self.retrieve_txt_record(tables[2]) if len(tables) > 2 else []
+        res['dns_records']['host'] = self.retrieve_results(tables[3]) if len(tables) > 3 else []
 
         # Network mapping image
         try:
@@ -110,14 +139,12 @@ class DNSDumpsterAPI(object):
             res['image_data'] = image_data
 
         # XLS hosts.
-        # eg. tsebo.com-201606131255.xlsx
         try:
             pattern = r'/static/xls/' + domain + '-[0-9]{12}\.xlsx'
-            xls_url = re.findall(pattern, req.content.decode('utf-8'))[0]
+            xls_url = re.findall(pattern, req.content.decode('utf-8', errors='ignore'))[0]
             xls_url = 'https://dnsdumpster.com' + xls_url
             xls_data = base64.b64encode(self.session.get(xls_url).content)
         except Exception as err:
-            print(err)
             xls_data = None
         finally:
             res['xls_data'] = xls_data
