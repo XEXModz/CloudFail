@@ -84,7 +84,15 @@ def subnetwork_to_ip_range(subnetwork):
 def dnsdumpster(target):
     print_out(Fore.CYAN + "Testing for misconfigured DNS using dnsdumpster...")
 
-    res = DNSDumpsterAPI(False).search(target)
+    try:
+        res = DNSDumpsterAPI(False).search(target)
+    except Exception as e:
+        print_out(Fore.RED + "DNSDumpster scan failed: " + str(e))
+        return
+
+    if not res or not res.get('dns_records'):
+        print_out(Fore.RED + "No results from DNSDumpster (site may have changed)")
+        return
 
     if res['dns_records']['host']:
         for entry in res['dns_records']['host']:
